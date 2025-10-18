@@ -5,7 +5,7 @@
     <parent>
         <artifactId>TikTokLiveJava</artifactId>
         <groupId>io.github.jwdeveloper.tiktok</groupId>
-        <version>1.11.2-Release</version>
+        <version>1.11.4-Unofficial-Release</version>
     </parent>
     <modelVersion>4.0.0</modelVersion>
     <artifactId>API</artifactId>
@@ -77,6 +77,14 @@
                         </configuration>
                     </execution>
                 </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <source>17</source>
+                    <target>17</target>
+                </configuration>
             </plugin>
         </plugins>
     </build>

@@ -23,21 +23,21 @@
 package io.github.jwdeveloper.tiktok.common;
 
 import com.google.gson.*;
-import io.github.jwdeveloper.tiktok.http.mappers.*;
 import lombok.Data;
 import lombok.experimental.Accessors;
+import okhttp3.Request;
+import okhttp3.Response;
 
-import java.net.http.*;
 import java.util.Optional;
 import java.util.function.Function;
 
 @Data
 public class ActionResult<T> {
 
-	private static final Gson gson = new Gson().newBuilder().disableHtmlEscaping()
-		.registerTypeHierarchyAdapter(HttpResponse.class, new HttpResponseJsonMapper())
-		.registerTypeHierarchyAdapter(HttpRequest.class, new HttpRequestJsonMapper())
-		.setPrettyPrinting().create();
+	private static final Gson gson = new Gson().newBuilder()
+			.disableHtmlEscaping()
+			.setPrettyPrinting()
+			.create();
 
 	private boolean success = true;
 	private String message;
@@ -130,6 +130,17 @@ public class ActionResult<T> {
 
 	@Override
 	public String toString() {
-		return "ActionResult: "+gson.toJson(toJson());
+		return "ActionResult: " + gson.toJson(toJson());
 	}
+
+	// Helper method to add variadic messages
+	public ActionResult<T> message(Object... parts) {
+		StringBuilder sb = new StringBuilder();
+		for (Object part : parts) {
+			sb.append(part).append(" ");
+		}
+		this.message = sb.toString().trim();
+		return this;
+	}
+
 }

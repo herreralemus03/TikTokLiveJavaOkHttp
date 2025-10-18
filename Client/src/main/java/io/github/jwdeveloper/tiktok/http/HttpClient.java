@@ -26,13 +26,15 @@ import io.github.jwdeveloper.tiktok.common.ActionResult;
 import io.github.jwdeveloper.tiktok.data.settings.HttpClientSettings;
 import io.github.jwdeveloper.tiktok.exceptions.TikTokLiveRequestException;
 import lombok.AllArgsConstructor;
+import okhttp3.*;
 
-import java.net.*;
-import java.net.http.*;
-import java.nio.charset.*;
-import java.time.*;
-import java.util.*;
-import java.util.regex.*;
+import java.io.IOException;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 @AllArgsConstructor
@@ -40,102 +42,146 @@ public class HttpClient {
 
     protected final HttpClientSettings httpClientSettings;
     protected final String url;
-    protected final HttpRequest.BodyPublisher bodyPublisher;
-    private final Pattern pattern = Pattern.compile("charset=(.*?)(?=&|$)");
+    protected final RequestBody bodyPublisher;
 
-    public <T> ActionResult<HttpResponse<T>> toHttpResponse(HttpResponse.BodyHandler<T> handler) {
-        var client = prepareClient();
-        var request = prepareRequest();
+    public ActionResult<Response> toHttpResponse() {
+        OkHttpClient client = prepareClient();
+        Request request = prepareRequest();
+
         try {
-            var response = client.send(request, handler);
+            Response response = client.newCall(request).execute();
             var result = ActionResult.of(response);
-            return switch (response.statusCode()) {
-                case 420 -> result.message("HttpResponse Code:", response.statusCode(), "| IP Cloudflare Blocked.").failure();
+
+            return switch (response.code()) {
+                case 420 -> result.message("HttpResponse Code:", response.code(), "| IP Cloudflare Blocked.").failure();
                 case 429 -> {
-                    var wait = response.headers().firstValue("ratelimit-reset");
-					if (wait.isEmpty())
-                        yield result.message("HttpResponse Code:", response.statusCode(), "| Sign server rate limit reached. Try again later.").failure();
-                    Duration duration = Duration.ofSeconds(Long.parseLong(wait.get()));
-                    yield result.message("HttpResponse Code:", response.statusCode(),
-                        String.format("| Sign server rate limit reached. Try again in %02d:%02d.", duration.toMinutesPart(), duration.toSecondsPart())).failure();
-				}
-                case 500, 501, 502, 503 -> result.message("HttpResponse Code:", response.statusCode(), "| Sign server Error. Try again later.").failure();
-                case 504 -> result.message("HttpResponse Code:", response.statusCode(), "| Sign server Timeout. Try again later.").failure();
+                    String wait = response.header("ratelimit-reset");
+                    if (wait == null) {
+                        yield result.message("HttpResponse Code:", response.code(), "| Sign server rate limit reached. Try again later.").failure();
+                    }
+                    Duration duration = Duration.ofSeconds(Long.parseLong(wait));
+                    yield result.message("HttpResponse Code:", response.code(),
+                            String.format("| Sign server rate limit reached. Try again in %02d:%02d.",
+                                    duration.toMinutesPart(), duration.toSecondsPart())).failure();
+                }
+                case 500, 501, 502, 503 -> result.message("HttpResponse Code:", response.code(), "| Sign server Error. Try again later.").failure();
+                case 504 -> result.message("HttpResponse Code:", response.code(), "| Sign server Timeout. Try again later.").failure();
                 case 200 -> result.success();
-                default -> result.message("HttpResponse Code:", response.statusCode()).failure();
+                default -> result.message("HttpResponse Code:", response.code()).failure();
             };
-		} catch (Exception e) {
+        } catch (IOException e) {
             throw new TikTokLiveRequestException(e);
         }
     }
 
-    public <T> ActionResult<T> toResponse(HttpResponse.BodyHandler<T> handler) {
-        return toHttpResponse(handler).map(HttpResponse::body);
-    }
-
     public ActionResult<String> toJsonResponse() {
-        return toResponse(HttpResponse.BodyHandlers.ofString());
-    }
+        ActionResult<Response> httpResult = toHttpResponse();
+        if (httpResult.isFailure()) {
+            return httpResult.cast();
+        }
 
-    private Charset charsetFrom(HttpHeaders headers) {
-        String type = headers.firstValue("Content-type").orElse("text/html; charset=utf-8");
-        int i = type.indexOf(";");
-        if (i >= 0) type = type.substring(i+1);
-        try {
-            Matcher matcher = pattern.matcher(type);
-            if (!matcher.find())
-                return StandardCharsets.UTF_8;
-            return Charset.forName(matcher.group(1));
-        } catch (Throwable x) {
-            return StandardCharsets.UTF_8;
+        try (Response response = httpResult.getContent()) {
+            ResponseBody body = response.body();
+            if (body == null) {
+                return ActionResult.failure("Response body is null");
+            }
+            String content = body.string();
+            return ActionResult.success(content);
+        } catch (IOException e) {
+            throw new TikTokLiveRequestException(e);
         }
     }
 
     public ActionResult<byte[]> toBinaryResponse() {
-        return toResponse(HttpResponse.BodyHandlers.ofByteArray());
+        ActionResult<Response> httpResult = toHttpResponse();
+        if (httpResult.isFailure()) {
+            return httpResult.cast();
+        }
+
+        try (Response response = httpResult.getContent()) {
+            ResponseBody body = response.body();
+            if (body == null) {
+                return ActionResult.failure("Response body is null");
+            }
+            byte[] content = body.bytes();
+            return ActionResult.success(content);
+        } catch (IOException e) {
+            throw new TikTokLiveRequestException(e);
+        }
     }
 
     public URI toUri() {
-        var stringUrl = prepareUrlWithParameters(url, httpClientSettings.getParams());
+        String stringUrl = prepareUrlWithParameters(url, httpClientSettings.getParams());
         return URI.create(stringUrl);
     }
 
-    /**
-     * @return {@link HttpRequest} with default GET, otherwise POST if {@link #bodyPublisher} is not null
-     */
-    protected HttpRequest prepareRequest() {
-        var requestBuilder = HttpRequest.newBuilder();
-        if (bodyPublisher != null)
-            requestBuilder.POST(bodyPublisher);
-        requestBuilder.uri(toUri());
-        requestBuilder.timeout(httpClientSettings.getTimeout());
+    protected Request prepareRequest() {
+        Request.Builder requestBuilder = new Request.Builder();
+
+        // Set URL
+        requestBuilder.url(toUri().toString());
+
+        // Set method (GET or POST)
+        if (bodyPublisher != null) {
+            requestBuilder.post(bodyPublisher);
+        } else {
+            requestBuilder.get();
+        }
+
+        // Add cookies to headers
         if (!httpClientSettings.getCookies().isEmpty()) {
-            String cookieString = httpClientSettings.getCookies().entrySet().stream().map(e -> e.getKey()+"="+e.getValue()).collect(Collectors.joining("; "));
+            String cookieString = httpClientSettings.getCookies().entrySet().stream()
+                    .map(e -> e.getKey() + "=" + e.getValue())
+                    .collect(Collectors.joining("; "));
             httpClientSettings.getHeaders().put("Cookie", cookieString);
         }
-        httpClientSettings.getHeaders().forEach(requestBuilder::setHeader);
 
-        httpClientSettings.getOnRequestCreating().accept(requestBuilder);
+        // Add headers
+        httpClientSettings.getHeaders().forEach(requestBuilder::addHeader);
+
         return requestBuilder.build();
     }
 
-    protected java.net.http.HttpClient prepareClient() {
-        var builder = java.net.http.HttpClient.newBuilder()
-            .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
-            .cookieHandler(new CookieManager())
-            .connectTimeout(httpClientSettings.getTimeout());
+    protected OkHttpClient prepareClient() {
+        OkHttpClient.Builder builder = new OkHttpClient.Builder();
 
-        httpClientSettings.getOnClientCreating().accept(builder);
+        // Set timeouts
+        Duration timeout = httpClientSettings.getTimeout();
+        builder.connectTimeout(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        builder.readTimeout(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        builder.writeTimeout(timeout.toMillis(), TimeUnit.MILLISECONDS);
+
+        // Follow redirects
+        builder.followRedirects(true);
+        builder.followSslRedirects(true);
+
+        // Cookie jar
+        builder.cookieJar(new CookieJar() {
+            private final java.util.HashMap<String, java.util.List<Cookie>> cookieStore = new java.util.HashMap<>();
+
+            @Override
+            public void saveFromResponse(HttpUrl url, java.util.List<Cookie> cookies) {
+                cookieStore.put(url.host(), cookies);
+            }
+
+            @Override
+            public java.util.List<Cookie> loadForRequest(HttpUrl url) {
+                java.util.List<Cookie> cookies = cookieStore.get(url.host());
+                return cookies != null ? cookies : new java.util.ArrayList<>();
+            }
+        });
+
         return builder.build();
     }
 
     protected String prepareUrlWithParameters(String url, Map<String, Object> parameters) {
-        if (parameters.isEmpty())
-			return url;
+        if (parameters.isEmpty()) {
+            return url;
+        }
 
         return url + "?" + parameters.entrySet().stream().map(entry -> {
-            var encodedKey = URLEncoder.encode(entry.getKey(), StandardCharsets.UTF_8);
-            var encodedValue = URLEncoder.encode(entry.getValue().toString(), StandardCharsets.UTF_8);
+            String encodedKey = URLEncoder.encode(entry.getKey(), StandardCharsets.UTF_8);
+            String encodedValue = URLEncoder.encode(entry.getValue().toString(), StandardCharsets.UTF_8);
             return encodedKey + "=" + encodedValue;
         }).collect(Collectors.joining("&"));
     }

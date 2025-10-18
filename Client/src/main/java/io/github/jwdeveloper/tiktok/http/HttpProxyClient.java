@@ -23,187 +23,101 @@
 package io.github.jwdeveloper.tiktok.http;
 
 import io.github.jwdeveloper.tiktok.common.ActionResult;
-import io.github.jwdeveloper.tiktok.data.settings.*;
-import io.github.jwdeveloper.tiktok.exceptions.*;
+import io.github.jwdeveloper.tiktok.data.settings.HttpClientSettings;
+import io.github.jwdeveloper.tiktok.data.settings.ProxyClientSettings;
+import io.github.jwdeveloper.tiktok.exceptions.TikTokLiveRequestException;
+import io.github.jwdeveloper.tiktok.exceptions.TikTokProxyRequestException;
+import okhttp3.*;
 
-import javax.net.ssl.*;
 import java.io.IOException;
-import java.net.*;
-import java.net.http.*;
-import java.net.http.HttpResponse.ResponseInfo;
-import java.security.*;
-import java.security.cert.X509Certificate;
-import java.util.*;
-import java.util.stream.Collectors;
+import java.net.InetSocketAddress;
+import java.net.Proxy;
+import java.time.Duration;
+import java.util.concurrent.TimeUnit;
 
 public class HttpProxyClient extends HttpClient {
 
 	private final ProxyClientSettings proxySettings;
 
-	public HttpProxyClient(HttpClientSettings httpClientSettings, String url, HttpRequest.BodyPublisher bodyPublisher) {
+	public HttpProxyClient(HttpClientSettings httpClientSettings, String url, RequestBody bodyPublisher) {
 		super(httpClientSettings, url, bodyPublisher);
 		this.proxySettings = httpClientSettings.getProxyClientSettings();
 	}
 
-	public ActionResult<HttpResponse<byte[]>> toResponse() {
+	@Override
+	public ActionResult<Response> toHttpResponse() {
 		return switch (proxySettings.getType()) {
-			case HTTP, DIRECT -> handleHttpProxyRequest();
-			default -> handleSocksProxyRequest();
+			case HTTP, SOCKS -> handleProxyRequest();
+			default -> super.toHttpResponse();
 		};
 	}
 
-	public ActionResult<HttpResponse<byte[]>> handleHttpProxyRequest() {
-		var builder = java.net.http.HttpClient.newBuilder()
-			.followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
-			.cookieHandler(new CookieManager())
-			.connectTimeout(httpClientSettings.getTimeout());
+	public ActionResult<Response> handleProxyRequest() {
+		OkHttpClient.Builder builder = new OkHttpClient.Builder();
+
+		// Set timeouts
+		Duration timeout = httpClientSettings.getTimeout();
+		builder.connectTimeout(timeout.toMillis(), TimeUnit.MILLISECONDS);
+		builder.readTimeout(timeout.toMillis(), TimeUnit.MILLISECONDS);
+		builder.writeTimeout(timeout.toMillis(), TimeUnit.MILLISECONDS);
+
+		// Follow redirects
+		builder.followRedirects(true);
+		builder.followSslRedirects(true);
+
+		// Cookie jar
+		builder.cookieJar(new CookieJar() {
+			private final java.util.HashMap<String, java.util.List<Cookie>> cookieStore = new java.util.HashMap<>();
+
+			@Override
+			public void saveFromResponse(HttpUrl url, java.util.List<Cookie> cookies) {
+				cookieStore.put(url.host(), cookies);
+			}
+
+			@Override
+			public java.util.List<Cookie> loadForRequest(HttpUrl url) {
+				java.util.List<Cookie> cookies = cookieStore.get(url.host());
+				return cookies != null ? cookies : new java.util.ArrayList<>();
+			}
+		});
 
 		while (proxySettings.hasNext()) {
 			try {
 				InetSocketAddress address = proxySettings.next().toSocketAddress();
-				builder.proxy(ProxySelector.of(address));
+				Proxy proxy = new Proxy(proxySettings.getType(), address);
+				builder.proxy(proxy);
 
-				httpClientSettings.getOnClientCreating().accept(builder);
-				var client = builder.build();
-				var request = prepareRequest();
+				OkHttpClient client = builder.build();
+				Request request = prepareRequest();
 
-				var response = client.send(request, HttpResponse.BodyHandlers.ofByteArray());
-				if (response.statusCode() != 200)
+				Response response = client.newCall(request).execute();
+
+				if (response.code() != 200) {
+					response.close();
 					continue;
+				}
+
 				return ActionResult.success(response);
-			} catch (HttpConnectTimeoutException | ConnectException e) {
-				if (proxySettings.isAutoDiscard())
-					proxySettings.remove();
-				throw new TikTokProxyRequestException(e);
+
 			} catch (IOException e) {
-				if (e.getMessage().contains("503") && proxySettings.isFallback()) // Indicates proxy protocol is not supported
-					return super.toHttpResponse(HttpResponse.BodyHandlers.ofByteArray());
-				throw new TikTokProxyRequestException(e);
+				if (e.getMessage() != null && e.getMessage().contains("503") && proxySettings.isFallback()) {
+					// Indicates proxy protocol is not supported
+					return super.toHttpResponse();
+				}
+
+				if (proxySettings.isAutoDiscard()) {
+					proxySettings.remove();
+				}
+
+				// Continue to next proxy
+				if (!proxySettings.hasNext()) {
+					throw new TikTokProxyRequestException(e);
+				}
 			} catch (Exception e) {
 				throw new TikTokLiveRequestException(e);
 			}
 		}
+
 		throw new TikTokLiveRequestException("No more proxies available!");
-	}
-
-	private ActionResult<HttpResponse<byte[]>> handleSocksProxyRequest() {
-		try {
-			SSLContext sc = SSLContext.getInstance("SSL");
-			sc.init(null, new TrustManager[]{ new X509TrustManager() {
-				public void checkClientTrusted(X509Certificate[] x509Certificates, String s) {}
-				public void checkServerTrusted(X509Certificate[] x509Certificates, String s) {}
-				public X509Certificate[] getAcceptedIssuers() { return null; }
-			}}, null);
-
-			URL url = toUri().toURL();
-
-			if (proxySettings.hasNext()) {
-				try {
-					Proxy proxy = new Proxy(Proxy.Type.SOCKS, proxySettings.next().toSocketAddress());
-
-					HttpsURLConnection socksConnection = (HttpsURLConnection) url.openConnection(proxy);
-					socksConnection.setSSLSocketFactory(sc.getSocketFactory());
-					socksConnection.setConnectTimeout(httpClientSettings.getTimeout().toMillisPart());
-					socksConnection.setReadTimeout(httpClientSettings.getTimeout().toMillisPart());
-					httpClientSettings.getHeaders().forEach(socksConnection::setRequestProperty);
-
-					byte[] body = socksConnection.getInputStream().readAllBytes();
-
-					Map<String, List<String>> headers = socksConnection.getHeaderFields()
-						.entrySet()
-						.stream()
-						.filter(entry -> entry.getKey() != null)
-						.collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
-
-					var responseInfo = createResponseInfo(socksConnection.getResponseCode(), headers);
-
-					var response = createHttpResponse(body, toUri(), responseInfo);
-
-					return ActionResult.success(response);
-				} catch (IOException e) {
-					if (e.getMessage().contains("503") && proxySettings.isFallback()) // Indicates proxy protocol is not supported
-						return super.toHttpResponse(HttpResponse.BodyHandlers.ofByteArray());
-					if (proxySettings.isAutoDiscard())
-						proxySettings.remove();
-					throw new TikTokProxyRequestException(e);
-				} catch (Exception e) {
-					throw new TikTokLiveRequestException(e);
-				}
-			}
-			throw new TikTokLiveRequestException("No more proxies available!");
-		} catch (NoSuchAlgorithmException | MalformedURLException | KeyManagementException e) {
-			// Should never be reached!
-			System.out.println("handleSocksProxyRequest: If you see this, message us on discord!");
-			e.printStackTrace();
-		} catch (TikTokLiveRequestException e) {
-			e.printStackTrace();
-		}
-		return ActionResult.failure();
-	}
-
-	private ResponseInfo createResponseInfo(int code, Map<String, List<String>> headers) {
-		return new ResponseInfo() {
-			@Override
-			public int statusCode() {
-				return code;
-			}
-
-			@Override
-			public HttpHeaders headers() {
-				return HttpHeaders.of(headers, (s, s1) -> s != null);
-			}
-
-			@Override
-			public java.net.http.HttpClient.Version version() {
-				return java.net.http.HttpClient.Version.HTTP_2;
-			}
-		};
-	}
-
-	private HttpResponse<byte[]> createHttpResponse(byte[] body,
-												   URI uri,
-												   ResponseInfo info) {
-		return new HttpResponse<>()
-		{
-			@Override
-			public int statusCode() {
-				return info.statusCode();
-			}
-
-			@Override
-			public HttpRequest request() {
-				throw new UnsupportedOperationException("TODO");
-			}
-
-			@Override
-			public Optional<HttpResponse<byte[]>> previousResponse() {
-				return Optional.empty();
-			}
-
-			@Override
-			public HttpHeaders headers() {
-				return info.headers();
-			}
-
-			@Override
-			public byte[] body() {
-				return body;
-			}
-
-			@Override
-			public Optional<SSLSession> sslSession() {
-				throw new UnsupportedOperationException("TODO");
-			}
-
-			@Override
-			public URI uri() {
-				return uri;
-			}
-
-			@Override
-			public java.net.http.HttpClient.Version version() {
-				return info.version();
-			}
-		};
 	}
 }

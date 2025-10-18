@@ -24,12 +24,14 @@ package io.github.jwdeveloper.tiktok.data.models;
 
 import io.github.jwdeveloper.tiktok.exceptions.TikTokLiveException;
 import lombok.Getter;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
 
 import javax.imageio.ImageIO;
 import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.io.*;
-import java.net.URL;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
@@ -39,6 +41,7 @@ public class Picture {
     private final String link;
 
     private Image image;
+    private static final OkHttpClient httpClient = new OkHttpClient();
 
     public Picture(String link) {
         this.link = link;
@@ -74,22 +77,26 @@ public class Picture {
             return null;
         }
 
-        var baos = new ByteArrayOutputStream();
-        try (var is = new URL(urlString).openStream()) {
-            var byteChunk = new byte[4096];
-            int n;
+        Request request = new Request.Builder()
+                .url(urlString)
+                .get()
+                .build();
 
-            while ((n = is.read(byteChunk)) > 0) {
-                baos.write(byteChunk, 0, n);
+        try (Response response = httpClient.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                throw new TikTokLiveException("Failed to download image: HTTP " + response.code());
+            }
+
+            if (response.body() == null) {
+                throw new TikTokLiveException("Response body is null");
+            }
+
+            byte[] imageBytes = response.body().bytes();
+            try (ByteArrayInputStream bais = new ByteArrayInputStream(imageBytes)) {
+                return ImageIO.read(bais);
             }
         } catch (IOException e) {
-            throw new TikTokLiveException("Unable map downloaded image", e);
-        }
-
-        try (var bais = new ByteArrayInputStream(baos.toByteArray())) {
-            return ImageIO.read(bais);
-        } catch (IOException e) {
-            throw new TikTokLiveException("Unable map downloaded image bytes to Image", e);
+            throw new TikTokLiveException("Unable to download or parse image", e);
         }
     }
 
@@ -98,8 +105,9 @@ public class Picture {
     }
 
     public Picture asUnsigned() {
-        if (link == null || link.isEmpty())
+        if (link == null || link.isEmpty()) {
             return this;
+        }
         // p16-sign-va.tiktokcdn.com -> p16-va.tiktokcdn.com || p16-sign.tiktokcdn.com -> p16.tiktokcdn.com
         return new Picture(link.replace("-sign-", "-").replace("-sign.", "."));
     }
@@ -111,7 +119,14 @@ public class Picture {
 
     @Override
     public final boolean equals(Object o) {
-        return o == this || o instanceof Picture picture && picture.link != null && picture.link.equals(link);
+        if (o == this) {
+            return true;
+        }
+        if (o instanceof Picture) {
+            Picture picture = (Picture) o;
+            return picture.link != null && picture.link.equals(link);
+        }
+        return false;
     }
 
     @Override

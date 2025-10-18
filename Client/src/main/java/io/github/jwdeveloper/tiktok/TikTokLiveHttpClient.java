@@ -33,23 +33,22 @@ import io.github.jwdeveloper.tiktok.http.*;
 import io.github.jwdeveloper.tiktok.http.mappers.*;
 import io.github.jwdeveloper.tiktok.live.LiveRoomInfo;
 import io.github.jwdeveloper.tiktok.messages.webcast.ProtoMessageFetchResult;
+import okhttp3.MediaType;
+import okhttp3.RequestBody;
+import okhttp3.Response;
 
-import java.net.http.*;
 import java.util.function.Consumer;
 import java.util.logging.Logger;
 
-public class TikTokLiveHttpClient implements LiveHttpClient
-{
-    /**
-	 * <a href="https://github-wiki-see.page/m/isaackogan/TikTokLive/wiki/All-About-Signatures">Signing API by Isaac Kogan</a>
-	 */
+public class TikTokLiveHttpClient implements LiveHttpClient {
+
     private static final String TIKTOK_SIGN_API = "https://tiktok.eulerstream.com/webcast/fetch";
     private static final String TIKTOK_CHAT_URL = "https://tiktok.eulerstream.com/webcast/chat";
     private static final String TIKTOK_SIGN_ENTERPRISE_API = "https://tiktok.enterprise.eulerstream.com/webcast/fetch";
     private static final String TIKTOK_CHAT_ENTERPRISE_URL = "https://tiktok.enterprise.eulerstream.com/webcast/chat";
     private static final String TIKTOK_URL_WEB = "https://www.tiktok.com/";
     private static final String TIKTOK_URL_WEBCAST = "https://webcast.tiktok.com/webcast/";
-    private static final String TIKTOK_ROOM_GIFTS_URL = TIKTOK_URL_WEBCAST+"gift/list/";
+    private static final String TIKTOK_ROOM_GIFTS_URL = TIKTOK_URL_WEBCAST + "gift/list/";
     private static final String TIKTOK_ROOM_INFO_URL = TIKTOK_URL_WEBCAST + "room/info";
     public static final int TIKTOK_AGE_RESTRICTED_CODE = 4003110;
 
@@ -61,7 +60,7 @@ public class TikTokLiveHttpClient implements LiveHttpClient
     public TikTokLiveHttpClient(HttpClientFactory factory) {
         this.httpFactory = factory;
         this.clientSettings = factory.getLiveClientSettings();
-        this.logger = LoggerFactory.create("HttpClient-"+hashCode(), clientSettings);
+        this.logger = LoggerFactory.create("HttpClient-" + hashCode(), clientSettings);
     }
 
     public TikTokLiveHttpClient(Consumer<LiveClientSettings> consumer) {
@@ -83,12 +82,13 @@ public class TikTokLiveHttpClient implements LiveHttpClient
 
     public GiftsData.Response getRoomGiftsData(String room_id) {
         var result = httpFactory.client(TIKTOK_ROOM_GIFTS_URL)
-            .withParam("room_id", room_id)
-            .build()
-            .toJsonResponse();
+                .withParam("room_id", room_id)
+                .build()
+                .toJsonResponse();
 
-        if (result.isFailure())
-            throw new TikTokLiveRequestException("Unable to fetch gifts information's - "+result);
+        if (result.isFailure()) {
+            throw new TikTokLiveRequestException("Unable to fetch gifts information's - " + result);
+        }
 
         var json = result.getContent();
         return GiftsDataMapper.mapRoom(json);
@@ -110,15 +110,16 @@ public class TikTokLiveHttpClient implements LiveHttpClient
     public LiveUserData.Response getLiveUserData(LiveUserData.Request request) {
         var url = TIKTOK_URL_WEB + "api-live/user/room";
         var result = httpFactory.client(url)
-            .withParam("uniqueId", request.getUserName())
-            .withParam("sourceType", "54") //MAGIC NUMBER, WHAT 54 means?
-            .withCookie("sessionid", clientSettings.getSessionId())
-            .withCookie("tt-target-idc", clientSettings.getTtTargetIdc())
-            .build()
-            .toJsonResponse();
+                .withParam("uniqueId", request.getUserName())
+                .withParam("sourceType", "54")
+                .withCookie("sessionid", clientSettings.getSessionId())
+                .withCookie("tt-target-idc", clientSettings.getTtTargetIdc())
+                .build()
+                .toJsonResponse();
 
-        if (result.isFailure())
-            throw new TikTokLiveRequestException("Unable to get information's about user - "+result);
+        if (result.isFailure()) {
+            throw new TikTokLiveRequestException("Unable to get information's about user - " + result);
+        }
 
         var json = result.getContent();
         return LiveUserDataMapper.map(json, logger);
@@ -139,14 +140,15 @@ public class TikTokLiveHttpClient implements LiveHttpClient
 
     public LiveData.Response getLiveData(LiveData.Request request) {
         var result = httpFactory.client(TIKTOK_ROOM_INFO_URL)
-            .withParam("room_id", request.getRoomId())
-            .withCookie("sessionid", clientSettings.getSessionId())
-            .withCookie("tt-target-idc", clientSettings.getTtTargetIdc())
-            .build()
-            .toJsonResponse();
+                .withParam("room_id", request.getRoomId())
+                .withCookie("sessionid", clientSettings.getSessionId())
+                .withCookie("tt-target-idc", clientSettings.getTtTargetIdc())
+                .build()
+                .toJsonResponse();
 
-        if (result.isFailure())
-            throw new TikTokLiveRequestException("Unable to get info about live room - "+result);
+        if (result.isFailure()) {
+            throw new TikTokLiveRequestException("Unable to get info about live room - " + result);
+        }
 
         var json = result.getContent();
         return LiveDataMapper.map(json);
@@ -155,16 +157,18 @@ public class TikTokLiveHttpClient implements LiveHttpClient
     @Override
     public LiveConnectionData.Response fetchLiveConnectionData(LiveConnectionData.Request request) {
         var result = getStartingPayload(request);
-        HttpResponse<byte[]> credentialsResponse = result.getContent(); // Always guaranteed to have response
+        Response credentialsResponse = result.getContent();
 
         try {
-            var resultHeader = ActionResult.of(credentialsResponse.headers().firstValue("x-set-tt-cookie"));
-            if (resultHeader.isFailure()) {
-                logger.warning("Sign Server Headers: "+request.getRoomId()+" - "+credentialsResponse.headers().map());
-                throw new TikTokSignServerException("Sign server did not return the x-set-tt-cookie header - "+result);
+            String websocketCookie = credentialsResponse.header("x-set-tt-cookie");
+            if (websocketCookie == null) {
+                logger.warning("Sign Server Headers: " + request.getRoomId() + " - " + credentialsResponse.headers());
+                throw new TikTokSignServerException("Sign server did not return the x-set-tt-cookie header - " + result);
             }
-            var websocketCookie = resultHeader.getContent();
-            var webcastResponse = ProtoMessageFetchResult.parseFrom(credentialsResponse.body());
+
+            byte[] responseBody = credentialsResponse.body().bytes();
+            var webcastResponse = ProtoMessageFetchResult.parseFrom(responseBody);
+
             var webSocketUrl = httpFactory
                     .client(webcastResponse.getPushServer())
                     .withParam("room_id", request.getRoomId())
@@ -175,9 +179,13 @@ public class TikTokLiveHttpClient implements LiveHttpClient
                     .build()
                     .toUri();
 
+            credentialsResponse.close();
             return new LiveConnectionData.Response(websocketCookie, webSocketUrl, webcastResponse);
+
         } catch (InvalidProtocolBufferException e) {
-            throw new TikTokSignServerException("Unable to parse websocket credentials response to WebcastResponse - "+result);
+            throw new TikTokSignServerException("Unable to parse websocket credentials response to WebcastResponse - " + result);
+        } catch (Exception e) {
+            throw new TikTokLiveRequestException(e);
         }
     }
 
@@ -200,15 +208,20 @@ public class TikTokLiveHttpClient implements LiveHttpClient
         body.addProperty("sessionId", clientSettings.getSessionId());
         body.addProperty("ttTargetIdc", clientSettings.getTtTargetIdc());
         body.addProperty("roomId", roomInfo.getRoomId());
-        HttpClientBuilder builder = httpFactory.client(clientSettings.isUseEulerstreamEnterprise() ? TIKTOK_CHAT_ENTERPRISE_URL : TIKTOK_CHAT_URL)
-            .withHeader("Content-Type", "application/json");
-        if (clientSettings.getApiKey() != null)
+
+        HttpClientBuilder builder = httpFactory.client(
+                        clientSettings.isUseEulerstreamEnterprise() ? TIKTOK_CHAT_ENTERPRISE_URL : TIKTOK_CHAT_URL)
+                .withHeader("Content-Type", "application/json");
+
+        if (clientSettings.getApiKey() != null) {
             builder.withHeader("x-api-key", clientSettings.getApiKey());
-        var result = builder.withBody(HttpRequest.BodyPublishers.ofString(body.toString())).build().toJsonResponse();
+        }
+
+        var result = builder.withBody(body.toString()).build().toJsonResponse();
         return result.isSuccess();
     }
 
-    protected ActionResult<HttpResponse<byte[]>> getStartingPayload(LiveConnectionData.Request request) {
+    protected ActionResult<Response> getStartingPayload(LiveConnectionData.Request request) {
         var proxyClientSettings = clientSettings.getHttpSettings().getProxyClientSettings();
         if (proxyClientSettings.isEnabled()) {
             while (proxyClientSettings.hasNext()) {
@@ -220,20 +233,24 @@ public class TikTokLiveHttpClient implements LiveHttpClient
         return getByteResponse(request.getRoomId());
     }
 
-    protected ActionResult<HttpResponse<byte[]>> getByteResponse(String room_id) {
-        HttpClientBuilder builder = httpFactory.client(clientSettings.isUseEulerstreamEnterprise() ? TIKTOK_SIGN_ENTERPRISE_API : TIKTOK_SIGN_API)
-            .withParam("client", "ttlive-java")
-            .withParam("room_id", room_id);
+    protected ActionResult<Response> getByteResponse(String room_id) {
+        HttpClientBuilder builder = httpFactory.client(
+                        clientSettings.isUseEulerstreamEnterprise() ? TIKTOK_SIGN_ENTERPRISE_API : TIKTOK_SIGN_API)
+                .withParam("client", "ttlive-java")
+                .withParam("room_id", room_id);
 
-        if (clientSettings.getSessionId() != null) // Allows receiving of all comments and Subscribe Events
+        if (clientSettings.getSessionId() != null) {
             builder.withParam("session_id", clientSettings.getSessionId());
-        if (clientSettings.getApiKey() != null)
+        }
+        if (clientSettings.getApiKey() != null) {
             builder.withHeader("x-api-key", clientSettings.getApiKey());
+        }
 
-        var result = builder.build().toHttpResponse(HttpResponse.BodyHandlers.ofByteArray());
+        var result = builder.build().toHttpResponse();
 
-        if (result.isFailure())
-            throw new TikTokSignServerException("Unable to get websocket connection credentials - "+result);
+        if (result.isFailure()) {
+            throw new TikTokSignServerException("Unable to get websocket connection credentials - " + result);
+        }
 
         return result;
     }

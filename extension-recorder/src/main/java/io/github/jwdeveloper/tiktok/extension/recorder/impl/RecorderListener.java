@@ -33,12 +33,13 @@ import io.github.jwdeveloper.tiktok.extension.recorder.impl.enums.LiveQuality;
 import io.github.jwdeveloper.tiktok.extension.recorder.impl.event.*;
 import io.github.jwdeveloper.tiktok.live.LiveClient;
 import io.github.jwdeveloper.tiktok.models.ConnectionState;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
 
 import java.io.*;
-import java.net.URI;
-import java.net.http.*;
-import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
 
@@ -49,6 +50,12 @@ public class RecorderListener implements LiveRecorder {
     private final AtomicBoolean token = new AtomicBoolean();
     private DownloadData downloadData;
     private CompletableFuture<Void> future;
+    private static final OkHttpClient httpClient = new OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .build();
 
     public RecorderListener(BiConsumer<RecorderSettings, LiveClient> consumer) {
         this.consumer = consumer;
@@ -63,73 +70,95 @@ public class RecorderListener implements LiveRecorder {
 
         liveClient.getLogger().info("Searching for live download url");
         downloadData = settings.getPrepareDownloadData() != null ?
-            settings.getPrepareDownloadData().apply(json) :
-            mapToDownloadData(json);
+                settings.getPrepareDownloadData().apply(json) :
+                mapToDownloadData(json);
 
         if (downloadData.getDownloadLiveUrl().isEmpty()) {
-			liveClient.getLogger().warning("Unable to find download live url!");
-            if (settings.isCancelConnectionIfNotFound())
+            liveClient.getLogger().warning("Unable to find download live url!");
+            if (settings.isCancelConnectionIfNotFound()) {
                 event.setCancelConnection(true, "Unable to find download live url!");
-		} else
+            }
+        } else {
             liveClient.getLogger().info("Live download url found!");
+        }
     }
 
     @TikTokEventObserver
     private void onConnected(LiveClient liveClient, TikTokConnectedEvent event) {
-        if (isConnected() || downloadData.getDownloadLiveUrl().isEmpty())
+        if (isConnected() || downloadData.getDownloadLiveUrl().isEmpty()) {
             return;
+        }
 
         var recordingStartedEvent = new TikTokLiveRecorderStartedEvent(downloadData, settings);
         liveClient.publishEvent(recordingStartedEvent);
-        if (recordingStartedEvent.isCanceled())
-			liveClient.getLogger().info("Recording cancelled");
-		else
-			future = CompletableFuture.runAsync(() -> {
-                try {
-                    liveClient.getLogger().info("Recording started "+liveClient.getRoomInfo().getHostName());
 
-                    HttpRequest.Builder requestBuilder = HttpRequest.newBuilder(URI.create(downloadData.getFullUrl())).GET();
-                    for (var entry : LiveClientSettings.DefaultRequestHeaders().entrySet())
-                        requestBuilder.header(entry.getKey(), entry.getValue());
-                    HttpResponse<InputStream> serverResponse = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NORMAL)
-                        .connectTimeout(Duration.ofSeconds(10)).build().send(requestBuilder.build(), HttpResponse.BodyHandlers.ofInputStream());
+        if (recordingStartedEvent.isCanceled()) {
+            liveClient.getLogger().info("Recording cancelled");
+        } else {
+            future = CompletableFuture.runAsync(() -> {
+                try {
+                    liveClient.getLogger().info("Recording started " + liveClient.getRoomInfo().getHostName());
+
+                    Request.Builder requestBuilder = new Request.Builder()
+                            .url(downloadData.getFullUrl())
+                            .get();
+
+                    // Add default headers
+                    for (var entry : LiveClientSettings.DefaultRequestHeaders().entrySet()) {
+                        requestBuilder.addHeader(entry.getKey(), entry.getValue());
+                    }
+
+                    Request request = requestBuilder.build();
+                    Response response = httpClient.newCall(request).execute();
+
+                    if (!response.isSuccessful()) {
+                        throw new IOException("Failed to download stream: HTTP " + response.code());
+                    }
 
                     var file = settings.getOutputFile();
                     file.getParentFile().mkdirs();
                     file.createNewFile();
 
                     try (
-                        var in = serverResponse.body();
-                        var fos = new FileOutputStream(file, true)
+                            InputStream in = response.body().byteStream();
+                            FileOutputStream fos = new FileOutputStream(file, true)
                     ) {
                         byte[] dataBuffer = new byte[1024];
                         int bytesRead;
-                        while (!token.get() && (!settings.isStopOnDisconnect() || liveClient.getRoomInfo().getConnectionState() == ConnectionState.CONNECTED) && (bytesRead = in.read(dataBuffer)) != -1) {
+
+                        while (!token.get() &&
+                                (!settings.isStopOnDisconnect() ||
+                                        liveClient.getRoomInfo().getConnectionState() == ConnectionState.CONNECTED) &&
+                                (bytesRead = in.read(dataBuffer)) != -1) {
                             fos.write(dataBuffer, 0, bytesRead);
                             fos.flush();
                         }
                     } catch (IOException e) {
                         e.printStackTrace();
                     } finally {
+                        response.close();
                         liveClient.getLogger().info("Stopped recording " + liveClient.getRoomInfo().getHostName());
                         liveClient.publishEvent(new TikTokLiveRecorderEndedEvent(settings));
                     }
                 } catch (Exception e) {
                     e.printStackTrace();
                 }
-			});
+            });
+        }
     }
 
     @TikTokEventObserver
     private void onDisconnected(LiveClient liveClient, TikTokDisconnectedEvent event) {
-        if (isConnected() && settings.isStopOnDisconnect())
+        if (isConnected() && settings.isStopOnDisconnect()) {
             token.set(true);
+        }
     }
 
     @TikTokEventObserver
     private void onLiveEnded(LiveClient liveClient, TikTokLiveEndedEvent event) {
-        if (isConnected())
-			token.set(true);
+        if (isConnected()) {
+            token.set(true);
+        }
     }
 
     private DownloadData mapToDownloadData(String json) {
@@ -137,29 +166,23 @@ public class RecorderListener implements LiveRecorder {
             var parsedJson = JsonParser.parseString(json);
             var jsonObject = parsedJson.getAsJsonObject();
             var streamDataJson = jsonObject.getAsJsonObject("data")
-                .getAsJsonObject("liveRoom")
-                .getAsJsonObject("streamData")
-                .getAsJsonObject("pull_data")
-                .get("stream_data")
-                .getAsString();
+                    .getAsJsonObject("liveRoom")
+                    .getAsJsonObject("streamData")
+                    .getAsJsonObject("pull_data")
+                    .get("stream_data")
+                    .getAsString();
 
             var streamDataJsonObject = JsonParser.parseString(streamDataJson).getAsJsonObject();
 
             var urlLink = streamDataJsonObject.getAsJsonObject("data")
-                .getAsJsonObject(LiveQuality.origin.name())
-                .getAsJsonObject("main")
-                .get("flv")
-                .getAsString();
+                    .getAsJsonObject(LiveQuality.origin.name())
+                    .getAsJsonObject("main")
+                    .get("flv")
+                    .getAsString();
 
             var sessionId = streamDataJsonObject.getAsJsonObject("common")
-                .get("session_id")
-                .getAsString();
-
-            //main
-            //https://pull-f5-tt03.fcdn.eu.tiktokcdn.com/stage/stream-3284937501738533765.flv?session_id=136-20240109000954BF818F1B3A8E5E39E238&_webnoredir=1
-            //Working
-            //https://pull-f5-tt03.fcdn.eu.tiktokcdn.com/game/stream-3284937501738533765_sd5.flv?_session_id=136-20240109001052D91FDBC00143211020C8.1704759052997&_webnoredir=1
-            //https://pull-f5-tt02.fcdn.eu.tiktokcdn.com/stage/stream-3861399216374940610_uhd5.flv?_session_id=136-20240109000223D0BAA1A83974490EE630.1704758544391&_webnoredir=1
+                    .get("session_id")
+                    .getAsString();
 
             return new DownloadData(urlLink, sessionId);
         } catch (Exception e) {

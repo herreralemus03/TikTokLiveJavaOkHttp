@@ -32,7 +32,7 @@ import java.time.Duration;
 import java.util.logging.Level;
 
 public class ConnectionExample {
-    public static String TIKTOK_HOSTNAME = "yttvandroid";
+    public static String TIKTOK_HOSTNAME = "reberocks_";
 
     public static void main(String[] args) throws IOException {
 

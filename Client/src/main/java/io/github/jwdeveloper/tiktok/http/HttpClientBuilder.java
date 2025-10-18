@@ -23,8 +23,9 @@
 package io.github.jwdeveloper.tiktok.http;
 
 import io.github.jwdeveloper.tiktok.data.settings.HttpClientSettings;
+import okhttp3.MediaType;
+import okhttp3.RequestBody;
 
-import java.net.http.HttpRequest;
 import java.util.Map;
 import java.util.function.Consumer;
 
@@ -32,7 +33,7 @@ public class HttpClientBuilder {
 
     private final HttpClientSettings httpClientSettings;
     private String url;
-    private HttpRequest.BodyPublisher bodyPublisher;
+    private RequestBody bodyPublisher;
 
     public HttpClientBuilder(String url, HttpClientSettings httpClientSettings) {
         this.httpClientSettings = httpClientSettings;
@@ -55,8 +56,9 @@ public class HttpClientBuilder {
     }
 
     public HttpClientBuilder withCookie(String name, String value) {
-        if (name != null && value != null)
+        if (name != null && value != null) {
             httpClientSettings.getCookies().put(name, value);
+        }
         return this;
     }
 
@@ -80,15 +82,21 @@ public class HttpClientBuilder {
         return this;
     }
 
-    public HttpClientBuilder withBody(HttpRequest.BodyPublisher bodyPublisher) {
+    public HttpClientBuilder withBody(String body) {
+        this.bodyPublisher = RequestBody.create(body, MediaType.parse("application/json; charset=utf-8"));
+        return this;
+    }
+
+    public HttpClientBuilder withBody(RequestBody bodyPublisher) {
         this.bodyPublisher = bodyPublisher;
         return this;
     }
 
     public HttpClient build() {
         var proxyClientSettings = httpClientSettings.getProxyClientSettings();
-        if (proxyClientSettings.isEnabled() && proxyClientSettings.hasNext())
+        if (proxyClientSettings.isEnabled() && proxyClientSettings.hasNext()) {
             return new HttpProxyClient(httpClientSettings, url, bodyPublisher);
+        }
         return new HttpClient(httpClientSettings, url, bodyPublisher);
     }
 }

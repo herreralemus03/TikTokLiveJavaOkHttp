@@ -23,10 +23,10 @@
 package io.github.jwdeveloper.tiktok.data.models.http;
 
 import lombok.Data;
+import okhttp3.Request;
+import okhttp3.Response;
 
 import java.net.URI;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.util.*;
 
 @Data
@@ -38,35 +38,56 @@ public class HttpData {
     int status;
     String body = "";
 
-
-    public static HttpData map(HttpRequest request) {
+    public static HttpData map(Request request) {
         var data = new HttpData();
-        data.setUrl(request.uri().getPath());
+        data.setUrl(request.url().uri().getPath());
         data.setMethod(request.method());
-        data.setParameters(extractQueryParams(request.uri()));
+        data.setParameters(extractQueryParams(request.url().uri()));
         data.setStatus(200);
-        if (request.bodyPublisher().isPresent()) {
-            data.setBody(request.bodyPublisher().get().toString());
+
+        if (request.body() != null) {
+            data.setBody(request.body().toString());
         }
-        data.setHeaders(Collections.unmodifiableMap(request.headers().map()));
+
+        // Convert OkHttp headers to Map
+        Map<String, List<String>> headersMap = new TreeMap<>();
+        for (String name : request.headers().names()) {
+            headersMap.put(name, request.headers().values(name));
+        }
+        data.setHeaders(Collections.unmodifiableMap(headersMap));
+
         return data;
     }
 
-    public static HttpData map(HttpResponse<String> response) {
+    public static HttpData map(Response response) {
         var data = new HttpData();
-        data.setUrl(response.uri().getPath());
+        data.setUrl(response.request().url().uri().getPath());
         data.setMethod(response.request().method());
-        data.setParameters(extractQueryParams(response.uri()));
-        data.setStatus(200);
-        data.setBody(response.body());
-        data.setHeaders(Collections.unmodifiableMap(response.headers().map()));
+        data.setParameters(extractQueryParams(response.request().url().uri()));
+        data.setStatus(response.code());
+
+        try {
+            if (response.body() != null) {
+                data.setBody(response.body().string());
+            }
+        } catch (Exception e) {
+            data.setBody("");
+        }
+
+        // Convert OkHttp headers to Map
+        Map<String, List<String>> headersMap = new TreeMap<>();
+        for (String name : response.headers().names()) {
+            headersMap.put(name, response.headers().values(name));
+        }
+        data.setHeaders(Collections.unmodifiableMap(headersMap));
+
         return data;
     }
-
 
     private static Map<String, String> extractQueryParams(URI uri) {
         Map<String, String> params = new HashMap<>();
         String query = uri.getQuery();
+
         if (query != null && !query.isEmpty()) {
             for (String param : query.split("&")) {
                 String[] keyValue = param.split("=");
